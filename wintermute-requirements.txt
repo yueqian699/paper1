@@ -1,0 +1,36 @@
+# Dependencies for the bundled hackingBuddyGPT (wintermute) runtime, which
+# serves both the wintermute baseline and the privescagent use-case bridge.
+# Mirrors wintermute/pyproject.toml, with the RAG stack pinned to the
+# 0.3.x series so that openai stays <2.0 as required by instructor==1.7.2.
+
+fabric==3.2.2
+Mako==1.3.2
+requests==2.32.3
+rich==13.7.1
+tiktoken==0.8.0
+instructor==1.7.2
+PyYAML==6.0.1
+python-dotenv==1.0.1
+pypsexec==0.3.0
+pydantic==2.8.2
+openai==1.65.2
+BeautifulSoup4
+nltk
+fastapi==0.114.0
+fastapi-utils==0.7.0
+jinja2==3.1.6
+uvicorn[standard]==0.30.6
+dataclasses_json==0.6.7
+websockets==13.1
+pandas
+faker
+fpdf
+
+# RAG stack (eagerly imported by hackingBuddyGPT.usecases.rag)
+langchain-core==0.3.45
+langchain-community==0.3.16
+langchain-openai==0.2.14
+langchain-chroma==0.1.4
+langchain-text-splitters==0.3.6
+chromadb==0.5.23
+markdown
